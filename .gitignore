@@ -1,0 +1,23 @@
+# R files
+.Rhistory
+.RData
+.Rproj.user
+
+# Quarto
+/.quarto/
+/_site/
+*.html
+
+# Output files (optionally exclude these)
+# output/
+
+# Data files (large files - consider using Git LFS or excluding)
+*.dta
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.tmp

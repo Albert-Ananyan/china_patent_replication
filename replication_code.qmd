@@ -1,0 +1,373 @@
+
+Packages needed
+```{r setup, message=FALSE, warning=FALSE}
+
+# Load required packages from the Tidyverse ecosystem
+library(tidyverse)      # Data manipulation and visualization (core Tidyverse)
+library(haven)          # The original paper used stat so we need this for reading Stata .dta files
+library(broom)          # Tidy regression output (Tidyverse-adjacent)
+library(estimatr)       # Robust standard errors and fixed effects
+library(tinytable)      # PDF tables for customized data displays
+library(modelsummary)   # Regression tables following Tidyverse principles
+```
+
+---
+
+# Load Data
+
+The analysis uses two datasets from Ang et al. (2023):
+
+1. **National yearly data** (`national_yearly.dta`): Time series at the national level from 1990-2014
+2. **Main panel data** (`main.dta`): City-year panel with 276 cities, 1990-2012, including patent outcomes and party secretary characteristics
+
+```{r load-data}
+# Load datasets
+national_yearly <- read_dta("data/national_yearly.dta")
+main_data <- read_dta("data/main.dta")
+
+# Check data dimensions
+cat("National yearly data:", nrow(national_yearly), "rows,",
+    ncol(national_yearly), "columns\n")
+cat("Main panel data:", nrow(main_data), "rows,",
+    ncol(main_data), "columns\n")
+```
+
+```{r preview-data}
+# Preview main variables
+glimpse(main_data)
+```
+
+## Key Variables
+
+`lnpatent_count`: Log number of patents
+`patent_novelshare`: Share of novel (multi-class) patents
+`govrevenueg_cls`: Intensity of Political Competition (IPC)
+`post`: Post-2006 campaign indicator
+`age`, `edu`, `gender`: Party secretary characteristics
+`lngdppc`: Log GDP per capita (city wealth)
+
+
+# Data Preparation
+
+```{r}
+#  Filtering to years ≤ 2012, following the original paper
+main_data_filtered <- main_data %>%
+  filter(year <= 2012)
+
+# Creating the key interaction term IPC × Post
+main_data_reg <- main_data_filtered %>%
+  mutate(
+    govrevenueg_cls_post = govrevenueg_cls * post,
+    f_lnpatent_count = lead(lnpatent_count, 1),
+    f_patent_novelshare = lead(patent_novelshare, 1)
+  )
+```
+
+```{r}
+cat("Summary of IPC × Post interaction:\n")
+summary(main_data_reg$govrevenueg_cls_post)
+
+cat("\nSummary of forward patent count:\n")
+summary(main_data_reg$f_lnpatent_count)
+
+cat("\nSummary of forward novel patent share:\n")
+summary(main_data_reg$f_patent_novelshare)
+```
+
+
+# Baseline Regressions
+
+ This is the first replicaition of Ang et al. 1: Effect on Total Patents (log)
+
+```{r baseline-regressions}
+
+# here we use lm_robust() from the estimatr package, which implements two-way fixed effects and clustered standard errors in one step.
+
+model_patents <- lm_robust(
+  f_lnpatent_count ~ govrevenueg_cls_post + govrevenueg_cls +
+    lngdppc + popugrowth + fdishare + gender + age + edu +
+    minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~citycode + year,   # City and year fixed effects
+  clusters = citycode,                 # Cluster standard errors by city
+  se_type = "stata"                   # Use Stata-style standard errors
+)
+
+# Model 2: Effect on Novel Patent Share
+# Question: Does political competition after 2006 reduce novel patent share?
+# This is the key outcome for testing the "gaming" hypothesis
+model_novel <- lm_robust(
+  f_patent_novelshare ~ govrevenueg_cls_post + govrevenueg_cls +
+    lngdppc + popugrowth + fdishare + gender + age + edu +
+    minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+```
+here I've organized the two baseline regression models into a named list, one for total patent quantity and one for the share of novel patents.
+```{r}
+#| tbl-cap: "Baseline Gaming Regressions (Replication of Ang et al. 2023)"
+
+models_baseline <- list(
+  "Total Patents (log)" = model_patents,
+  "Novel Patent Share" = model_novel
+)
+
+# with modelsummary() we produce a clean regression table.
+modelsummary(
+  models_baseline,
+  stars = TRUE,
+  statistic = "std.error",
+  gof_omit = "IC|Log|RMSE|Adj",
+  coef_map = c(
+    "govrevenueg_cls_post" = "IPC × Post-Campaign",  #This is the main treatment effect
+    "govrevenueg_cls" = "IPC" # Baseline competition level
+  ),
+  title = "Baseline Gaming Regressions"
+)
+```
+
+The code chunk below replicates Ang et al.'s Figure 1 by plotting the average log number of patents over time.
+
+```{r, echo=FALSE}
+#| fig-cap: "Replication of Ang et al. Figure 1: Patent Quantity Surged After 2006"
+main_data_reg %>%
+  group_by(year) %>%
+  # with this we calculate the mean log patent count for each year.
+  summarize(avg_log_patents = mean(lnpatent_count, na.rm = TRUE)) %>%
+  # and then plot this yearly trend using ggplot
+  ggplot(aes(x = year, y = avg_log_patents)) +
+  geom_line(linewidth = 1.2, color = "steelblue") + # This essentialy shows the rise in patent activity over time.
+  geom_vline(xintercept = 2006, linetype = "dashed", color = "red", linewidth = 1) +
+  annotate("text", x = 2007.5, y = 3.5, label = "2006 Campaign", color = "red", hjust = 0) +
+  labs(
+    x = "Year",
+    y = "Average Log Patent Count",
+    caption = "Note: Red dashed line indicates the 2006 'Indigenous Innovation' campaign launch."
+  ) +
+  theme_minimal() +
+  theme(plot.caption = element_text(hjust = 0))
+```
+This in turn replicates Ang et al.'s Figure 3 and plotts the average share of novel patents over time.
+
+```{r, echo=FALSE}
+#| label: fig-novelshare
+main_data_reg %>%
+  group_by(year) %>%
+  # calculating the average novel patent share for each year
+  summarize(avg_novel_share = mean(patent_novelshare, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = avg_novel_share)) +
+  geom_line(linewidth = 1.2, color = "darkgreen") +
+  geom_vline(xintercept = 2006, linetype = "dashed", color = "blue", linewidth = 1) +
+  annotate("text", x = 2007.5, y = 8, label = "2006 Campaign", color = "red", hjust = 0) +
+  labs(
+    x = "Year",
+    y = "Share of Novel Patents (%)",
+    caption = "Note: Novel patents are those combining two previously uncombined technology domains."
+  ) +
+  theme_minimal() +
+  theme(plot.caption = element_text(hjust = 0))
+```
+
+
+# Extension: Party Secretary Characteristics
+
+
+We first create the moderator variables and for that I have created binary indicators for official characteristics
+
+```{r}
+main_data_reg <- main_data_reg %>%
+  mutate(
+    # here we  create a binary "young" indicator based on the sample median.
+    young = ifelse(age < median(age, na.rm = TRUE), 1, 0),   # officials below the median age are coded as 1, older officials as 0, which allows me to test whether younger cadres game more aggressively.
+    #I also create a high_edu indicator for officials with a Master's degree or above, so  in the dataset, edu >= 4 corresponds to graduate-level education.
+    high_edu = ifelse(edu >= 4, 1, 0),
+    # this is to create IPC × Post interaction for convenience
+    ipc_post = govrevenueg_cls * post
+  )
+cat("Distribution of moderator variables:\n")
+cat("  Young officials:", sum(main_data_reg$young == 1, na.rm = TRUE),
+    "/", sum(!is.na(main_data_reg$young)), "\n")
+cat("  Highly educated:", sum(main_data_reg$high_edu == 1, na.rm = TRUE),
+    "/", sum(!is.na(main_data_reg$high_edu)), "\n")
+cat("  Female officials:", sum(main_data_reg$gender == 1, na.rm = TRUE),
+    "/", sum(!is.na(main_data_reg$gender)), "\n")
+```
+Below I examine whether the effect of political competition after 2006 (IPC × Post) varies across different types of party secretaries.
+.
+```{r}
+
+# there are three interactions in the model —by age, education, and gender,  each three-way interaction (e.g., ipc_post × young) captures whether a specific group games more or less than others
+
+# Model 1: Age Interaction
+# Tests: Do younger officials game more than older officials?
+fit_age <- lm_robust(
+  f_patent_novelshare ~ ipc_post * young +
+    lngdppc + popugrowth + fdishare + gender + edu + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~ citycode + year, #I keep the baseline controls, apply city and year fixed effects, and cluster standard errors at the city level to match the original identification strategy
+  clusters = citycode,
+  se_type = "stata"
+)
+
+# Model 2: Education Interaction
+# Tests: Do more educated officials game differently?
+fit_edu <- lm_robust(
+  f_patent_novelshare ~ ipc_post * high_edu +
+    lngdppc + popugrowth + fdishare + gender + age + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~ citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+
+# Model 3: Gender Interaction
+# Tests: Do female officials game differently than male officials?
+fit_gender <- lm_robust(
+  f_patent_novelshare ~ ipc_post * gender +
+    lngdppc + popugrowth + fdishare + age + edu + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~ citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+```
+
+Below we compile the three heterogeneity models into a single regression table to directly compare whether any moderator meaningfully alters the IPC × Post effect.
+
+```{r}
+#| tbl-cap: "Do Party Secretary Characteristics Moderate Gaming?"
+
+models_sec <- list(
+  "Age" = fit_age,
+  "Education" = fit_edu,
+  "Gender" = fit_gender
+)
+
+modelsummary(
+  models_sec,
+  # I retain standard fit statistics and significance markers
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  gof_map = c("nobs", "r.squared"),
+  coef_map = c(
+    "ipc_post" = "IPC × Post",
+    "ipc_post:young" = "IPC × Post × Young",
+    "ipc_post:high_edu" = "IPC × Post × High Edu",
+    "ipc_post:gender" = "IPC × Post × Female"
+  ),
+  title = "Party Secretary Characteristics and Gaming"
+)
+```
+
+Now we visualize the three-way interaction coefficients from the age, education, and gender models.
+
+
+This allows me to assess, in a single figure, whether any subgroup shows a meaningfully different gaming response.
+```{r}
+#| fig-cap: "Gaming is Universal: No Heterogeneity by Party Secretary Characteristics"
+
+# extract coefficients for the three-way interactions
+tidy_age = tidy(fit_age)
+tidy_edu = tidy(fit_edu)
+tidy_gender = tidy(fit_gender)
+
+# we create data frame for coefficient plot
+coef_data = tibble(
+  Moderator = c("Age\n(Young vs Old)",
+                "Education\n(High vs Low)",
+                "Gender\n(Female vs Male)"),
+  estimate = c(
+    tidy_age$estimate[tidy_age$term == "ipc_post:young"],
+    tidy_edu$estimate[tidy_edu$term == "ipc_post:high_edu"],
+    tidy_gender$estimate[tidy_gender$term == "ipc_post:gender"]
+  ),
+  std.error = c(
+    tidy_age$std.error[tidy_age$term == "ipc_post:young"],
+    tidy_edu$std.error[tidy_edu$term == "ipc_post:high_edu"],
+    tidy_gender$std.error[tidy_gender$term == "ipc_post:gender"]
+  )
+) %>%
+  mutate(
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error
+  )
+#extract each moderator's interaction termm compute 95% confidence intervals and plot them side by side
+
+# we then create coefficient plot
+ggplot(coef_data, aes(x = Moderator, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_point(size = 4, color = "steelblue") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.15, linewidth = 1, color = "steelblue") +
+  labs(
+    y = "Three-Way Interaction Coefficient\n(Difference in Gaming Effect)",
+    x = "",
+    caption = "Note: Points show coefficient estimates; bars show 95% CIs. All CIs include zero → no heterogeneity."
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    plot.caption = element_text(hjust = 0, size = 9)
+  )
+```
+
+Below we winsorize the novel patent share at the 10th and 90th percentiles to reduce the influence of extreme outliers without discarding data.
+
+```{r}
+
+#| tbl-cap: "Robustness Check: Winsorized Novel Patent Share (10% Trim)"
+
+p10 <- quantile(main_data_reg$patent_novelshare, 0.10, na.rm = TRUE)
+p90 <- quantile(main_data_reg$patent_novelshare, 0.90, na.rm = TRUE)
+
+main_data_reg <- main_data_reg %>%
+  mutate(
+    trimmed_novelshare = pmax(pmin(patent_novelshare, p90), p10),
+    f_trimmed_novelshare = lead(trimmed_novelshare, 1)
+  )
+
+# Now were-estimate the three interaction models using the winsorized outcome.
+fit_age_trim <- lm_robust(
+  f_trimmed_novelshare ~ ipc_post * young +
+    lngdppc + popugrowth + fdishare + gender + edu + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+
+fit_edu_trim <- lm_robust(
+  f_trimmed_novelshare ~ ipc_post * high_edu +
+    lngdppc + popugrowth + fdishare + gender + age + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+
+fit_gender_trim <- lm_robust(
+  f_trimmed_novelshare ~ ipc_post * gender +
+    lngdppc + popugrowth + fdishare + age + edu + minority + lngdp_province,
+  data = main_data_reg,
+  fixed_effects = ~citycode + year,
+  clusters = citycode,
+  se_type = "stata"
+)
+# finally we summarize the winsorized models side by side to compare them with the baseline estimates.
+modelsummary(
+  list("Age" = fit_age_trim, "Education" = fit_edu_trim, "Gender" = fit_gender_trim),
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  fmt = 3,
+  gof_map = c("nobs", "r.squared"),
+  coef_map = c(
+    "ipc_post" = "IPC × Post",
+    "ipc_post:young" = "IPC × Post × Young",
+    "ipc_post:high_edu" = "IPC × Post × High Edu",
+    "ipc_post:gender" = "IPC × Post × Female"
+  )
+)
+```
